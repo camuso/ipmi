@@ -1,0 +1,309 @@
+diff --git a/drivers/char/ipmi/ipmi_si_intf.c b/drivers/char/ipmi/ipmi_si_intf.c
+index 99fa3b3..82a65fc 100644
+--- a/drivers/char/ipmi/ipmi_si_intf.c
++++ b/drivers/char/ipmi/ipmi_si_intf.c
+@@ -318,6 +318,55 @@ static int of_registered;
+ static unsigned int kipmid_max_busy_us[SI_MAX_PARMS];
+ static int num_max_busy_us;
+ 
++/* DEBUG DECLARATIONS
++ */
++#define KIPMI_TMG_SI_EVENTS	1
++#define KIPMI_TMG_BUSY_WAIT	2
++#define KIPMI_TMG_SPLIT_TMO	128
++#define KIPMI_TMG_DBGMSG_SIZE	256
++
++struct dbgtmo {
++	ulong jifftime;
++	int count;
++	bool throt_msg_printed;
++	char *throt_msg;
++	int burst_limit;
++	int burst_interval;
++	int mask;
++};
++
++static int kipmi_dbg_tmg = 0;
++static int kipmi_dbg_tmg_thold = 40;
++static int kipmi_dbg_tmg_wait = 30;
++static int kipmi_dbg_tmg_param = 0;
++
++static bool incr_dbg_msg_count(ulong timer, int *count);
++static bool check_dbg_msg_tmo(ulong timer, int period);
++static void log_kipmi_event_handler_dbgmsg
++		(int si_sm_result, int intf_num, const char* func);
++static void throttle(struct dbgtmo *tmo);
++static void log_kipmi_busy_wait_dbgmsg(char *msg);
++
++#define prdbg(tmo, mask, args) \
++do { \
++	if (tmo->jifftime == 0) tmo->jifftime = jiffies; \
++	if ((kipmi_dbg_tmg & mask) && (tmo->count < tmo->burst_limit)) {\
++		printk args; \
++		incr_dbg_msg_count(tmo->jifftime, &tmo->count); \
++	} else throttle(tmo); \
++} while(0)
++
++#define pr_busy_wait_dbgmsg(args, msg) \
++do { \
++	if (kipmi_dbg_tmg & KIPMI_TMG_BUSY_WAIT) { \
++		snprintf args; \
++		log_kipmi_busy_wait_dbgmsg(msg); \
++	} \
++} while(0)
++
++/* END DEBUG DECLARATIONS
++ */
++
+ static int unload_when_empty = 1;
+ 
+ static int add_smi(struct smi_info *smi);
+@@ -770,6 +819,10 @@ static enum si_sm_result smi_event_handler(struct smi_info *smi_info,
+ 	 */
+ 	si_sm_result = smi_info->handlers->event(smi_info->si_sm, time);
+ 	time = 0;
++
++	log_kipmi_event_handler_dbgmsg(si_sm_result, smi_info->intf_num,
++					__func__);
++
+ 	while (si_sm_result == SI_SM_CALL_WITHOUT_DELAY)
+ 		si_sm_result = smi_info->handlers->event(smi_info->si_sm, 0);
+ 
+@@ -968,25 +1021,54 @@ static int ipmi_thread_busy_wait(enum si_sm_result smi_result,
+ {
+ 	unsigned int max_busy_us = 0;
+ 
+-	if (smi_info->intf_num < num_max_busy_us)
++	/* DEBUG code */
++	static char dbgmsg[KIPMI_TMG_DBGMSG_SIZE];
++#define msgarg dbgmsg,KIPMI_TMG_DBGMSG_SIZE
++
++	pr_busy_wait_dbgmsg((msgarg,
++		"\t%s: num_max_busy_us: %d max_busy_us: %d intf_num: %d",
++		__func__,
++		num_max_busy_us,
++		kipmid_max_busy_us[smi_info->intf_num],
++		smi_info->intf_num), dbgmsg);
++	/* END DEBUG code */
++
++	if (smi_info->intf_num < num_max_busy_us) {
++		pr_busy_wait_dbgmsg((msgarg,
++			"\t%s: intf_num < num_max_busy_us", __func__),
++			dbgmsg);
+ 		max_busy_us = kipmid_max_busy_us[smi_info->intf_num];
+-	if (max_busy_us == 0 || smi_result != SI_SM_CALL_WITH_DELAY)
++	}
++	if (max_busy_us == 0 || smi_result != SI_SM_CALL_WITH_DELAY) {
++		pr_busy_wait_dbgmsg((msgarg,
++			"\t%s: max_busy_us == 0 OR ...\n"
++			"\t\t... smi_result != SI_SM_CALL_WITH_DELAY", __func__),
++			 dbgmsg);
+ 		ipmi_si_set_not_busy(busy_until);
++	}
+ 	else if (!ipmi_si_is_busy(busy_until)) {
++		pr_busy_wait_dbgmsg((msgarg,
++			"\t%s: ipmi_si is NOT busy. Start TOD counter.\n"
++			"\t\tAdding %ld nS to current TOD",
++			__func__, max_busy_us*NSEC_PER_USEC), dbgmsg);
+ 		getnstimeofday(busy_until);
+ 		timespec_add_ns(busy_until, max_busy_us*NSEC_PER_USEC);
+ 	} else {
+ 		struct timespec now;
+ 		getnstimeofday(&now);
+ 		if (unlikely(timespec_compare(&now, busy_until) > 0)) {
++			pr_busy_wait_dbgmsg((msgarg,
++				"\t%s: NOT BUSY: Exceeded timeout: %ld nS",
++				__func__, max_busy_us*NSEC_PER_USEC),
++				dbgmsg);
+ 			ipmi_si_set_not_busy(busy_until);
+ 			return 0;
+ 		}
+ 	}
+ 	return 1;
++#undef msgarg
+ }
+ 
+-
+ /*
+  * A busy-waiting loop for speeding up IPMI operation.
+  *
+@@ -1005,12 +1087,15 @@ static int ipmi_thread(void *data)
+ 
+ 	ipmi_si_set_not_busy(&busy_until);
+ 
++	if (kipmi_dbg_tmg)
++		printk("%s: \n", __func__);
++
+ 	set_user_nice(current, 19);
+ 	while (!kthread_should_stop()) {
+ 		int busy_wait;
+ 
+ 		spin_lock_irqsave(&(smi_info->si_lock), flags);
+-		smi_result = smi_event_handler(smi_info, 0);
++		smi_result = smi_event_handler(smi_info, kipmi_dbg_tmg_param);
+ 		spin_unlock_irqrestore(&(smi_info->si_lock), flags);
+ 		busy_wait = ipmi_thread_busy_wait(smi_result, smi_info,
+ 						  &busy_until);
+@@ -1341,15 +1426,41 @@ MODULE_PARM_DESC(force_kipmid, "Force the kipmi daemon to be enabled (1) or"
+ 		 " disabled(0).  Normally the IPMI driver auto-detects"
+ 		 " this, but the value may be overridden by this parm.");
+ module_param(unload_when_empty, int, 0);
+-MODULE_PARM_DESC(unload_when_empty, "Unload the module if no interfaces are"
+-		 " specified or found, default is 1.  Setting to 0"
+-		 " is useful for hot add of devices using hotmod.");
++MODULE_PARM_DESC(unload_when_empty, " Unload the module if no interfaces are\n"
++		 "\t\t specified or found, default is 1.  Setting to 0\n"
++		 "\t\t is useful for hot add of devices using hotmod.\n");
+ module_param_array(kipmid_max_busy_us, uint, &num_max_busy_us, 0644);
+ MODULE_PARM_DESC(kipmid_max_busy_us,
+-		 "Max time (in microseconds) to busy-wait for IPMI data before"
+-		 " sleeping. 0 (default) means to wait forever. Set to 100-500"
+-		 " if kipmid is using up a lot of CPU time.");
++		 " Max time (in microseconds) to busy-wait for IPMI data before\n"
++		 "\t\t sleeping. 0 (default) means to wait forever. Set to 100-500\n"
++		 "\t\t if kipmid is using up a lot of CPU time.\n");
+ 
++/* DEBUG Parameters
++ *
++ * kipmi_dbg_tmg is a bit mask
++ * 1 - enable si_event loging
++ * 2 - busy/wait loop messages
++ * 128 (0x80) - splits message time outs, so that each debug
++ */
++module_param(kipmi_dbg_tmg, int, 0644);
++MODULE_PARM_DESC(kipmi_dbg_tmg,
++		" kipmi kernel thread timing debug bitmask.\n"
++		"\t\t 1 = smi event hander debug messages\n"
++		"\t\t 2 = kipmi thread busy/wait loop debug messages\n"
++		"\t\t 128 (0x80) = split kipmi_dbg_tmg message burst intervals.\n"
++		"\t\t Each message will have its own burst timing.\n"
++		"\t\t Default = 0\n");
++module_param(kipmi_dbg_tmg_thold, int, 0644);
++MODULE_PARM_DESC(kipmi_dbg_tmg_thold,
++		" Threshold in messages-per-minute (burst) at which kipmi_dbg_tmg\n"
++		"\t\tmessages are throttled. Default = 40\n");
++module_param(kipmi_dbg_tmg_wait, int, 0644);
++MODULE_PARM_DESC(kipmi_dbg_tmg_wait, " Burst interval in seconds between bursts of\n"
++		"\t\tkipmi_dbg_tmg tmessages. Default = 30\n");
++module_param(kipmi_dbg_tmg_param, int, 0644);
++MODULE_PARM_DESC(kipmi_dbg_tmg_param, 
++		" Time in uS passed in call to smi_event_handler from\n"
++		"\t\tipmi_thread. Default value = 0\n");
+ 
+ static void std_irq_cleanup(struct smi_info *info)
+ {
+@@ -3624,3 +3735,114 @@ MODULE_LICENSE("GPL");
+ MODULE_AUTHOR("Corey Minyard <minyard@mvista.com>");
+ MODULE_DESCRIPTION("Interface to the IPMI driver for the KCS, SMIC, and BT"
+ 		   " system interfaces.");
++
++/* DEBUG CODE
++ */
++
++struct msgmap {
++	int msgnum;
++	char* msgstr;
++};
++
++static struct dbgtmo kipmi_event_handler_dbgtmo = {
++	.jifftime = 0,
++	.count = 0,
++	.throt_msg_printed = false,
++	.throt_msg = "KIPMI_DBG: throttling si event messages",
++	.mask = KIPMI_TMG_SI_EVENTS
++};
++
++static struct dbgtmo kipmi_busy_wait_dbgtmo = {
++	.jifftime = 0,
++	.count = 0,
++	.throt_msg_printed = false,
++	.throt_msg = "KIPMI_DBG: throttling si busy loop messages",
++	.mask = KIPMI_TMG_BUSY_WAIT
++};
++
++static struct dbgtmo kipmi_common_dbgtmo = {
++	.jifftime = 0,
++	.count = 0,
++	.throt_msg_printed = false,
++	.throt_msg = "KIPMI_DBG: throttling kipmi debug messages",
++	.mask = (KIPMI_TMG_BUSY_WAIT || KIPMI_TMG_SI_EVENTS)
++};
++
++static struct msgmap si_events[] = {
++	{SI_SM_CALL_WITHOUT_DELAY, "SI_SM_CALL_WITHOUT_DELAY"},
++	{SI_SM_CALL_WITH_DELAY, "SI_SM_CALL_WITH_DELAY"},
++	{SI_SM_CALL_WITH_TICK_DELAY, "SI_SM_CALL_WITH_TICK_DELAY"},
++	{SI_SM_TRANSACTION_COMPLETE, "SI_SM_TRANSACTION_COMPLETE"},
++	{SI_SM_IDLE, "SI_SM_IDLE"},
++	{SI_SM_HOSED, "SI_SM_HOSED"},
++	{SI_SM_ATTN, "SI_SM_ATTN"},
++};
++
++static char* get_msg_string(struct msgmap* mm, int msg)
++{
++	int idx;
++	for(idx = 0; idx < sizeof(*mm); idx++)
++		if(msg == mm[idx].msgnum)
++			return mm[idx].msgstr;
++
++	return (char *)NULL;
++}
++
++static bool incr_dbg_msg_count(ulong timer, int *count)
++{
++	int incr = (jiffies_to_msecs(jiffies - timer) < 60000) ? 1 : 0;
++	*count += incr;
++	return incr ? true : false;
++}
++
++static bool check_dbg_msg_tmo(ulong timer, int period)
++{
++	return ((jiffies_to_msecs(jiffies - timer)) > period) ? true : false;
++}
++
++static void throttle(struct dbgtmo *tmo)
++{
++	if (!tmo->throt_msg_printed && (kipmi_dbg_tmg & tmo->mask)) {
++		printk("%s for %d seconds.\n",
++			tmo->throt_msg, tmo->burst_interval);
++		tmo->throt_msg_printed = true;
++	}
++
++	if (check_dbg_msg_tmo(tmo->jifftime, (tmo->burst_interval * 1000))) {
++		tmo->count = 0;
++		tmo->jifftime = jiffies;
++		tmo->throt_msg_printed = false;
++	}
++}
++
++/* log_kipmi_event_handler_dbgmsg - log info about si events.
++ *
++ */
++static void log_kipmi_event_handler_dbgmsg
++	(int si_sm_result, int intf_num, const char* func)
++{
++	struct dbgtmo *tmo = (kipmi_dbg_tmg & KIPMI_TMG_SPLIT_TMO)
++				? &kipmi_event_handler_dbgtmo
++				: &kipmi_common_dbgtmo;
++
++	tmo->burst_limit = kipmi_dbg_tmg_thold;
++	tmo->burst_interval = kipmi_dbg_tmg_wait;
++
++	prdbg(tmo, KIPMI_TMG_SI_EVENTS,
++		("KIPMI_DBG: %s: si_sm_result: %s intf_num: %d\n",
++		func, get_msg_string(si_events, si_sm_result), intf_num));
++}
++
++/* log_kipmi_busy_wait_dbgmsg
++ */
++static void log_kipmi_busy_wait_dbgmsg(char* msg)
++{
++	struct dbgtmo *tmo = (kipmi_dbg_tmg & KIPMI_TMG_SPLIT_TMO)
++				? &kipmi_busy_wait_dbgtmo
++				: &kipmi_common_dbgtmo;
++
++	tmo->burst_limit = kipmi_dbg_tmg_thold;
++	tmo->burst_interval = kipmi_dbg_tmg_wait;
++
++	prdbg(tmo, KIPMI_TMG_BUSY_WAIT, ("%s\n", msg));
++}

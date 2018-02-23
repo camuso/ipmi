@@ -1,0 +1,40 @@
+#!/bin/bash
+
+testdir="$HOME/intel-ipmi-test"
+resultlog="intel-ipmi-test.log"
+
+cat /dev/null > $resultlog
+
+[ ! -d "$testdir" ] && mkdir -p $testdir
+
+cd $testdir
+
+for ((i=0; i<10; i++)); do
+
+	# Create a logfile name based on the number of the test and copy
+	# its name into the result log.
+	#
+	logname=$(printf "test-%02d.log" $i)
+	echo $logname | tee -a $resultlog
+	echo "----------------------" >> $resultlog
+
+	# Run the test that intel provided for their CacheRiver IPMI tool
+	# and write the results into the logfile.
+	#
+	~/BMC/test ~/BMC/get.ini > $logname
+
+	# If there were no failures, then just tail the last two lines of
+	# the log file to the results file.
+	# Else, cat all the failures in the log file to the results file.
+	#
+	if grep -q "failed: 0" $logname ; then
+		tail -2 $logname >> $resultlog
+	else
+		# egrep -n -i -e fail -e err $logname >> $resultlog
+		grep -n -i fail $logname >> $resultlog
+	fi
+
+	echo -e "===================\n" >> $resultlog
+done
+
+cd -

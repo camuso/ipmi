@@ -1,0 +1,17 @@
+#!/bin/ksh
+
+x=0
+
+while true; do
+
+if (( $x % 1000 == 0 )); then
+	echo "$1: loop count: $x" >/dev/tty
+fi
+
+sleep 2
+/usr/bin/ipmitool raw 0x2e 0x00 0x0A 0x40 0x00
+/usr/bin/ipmitool raw 0x2C 0x00 0
+
+((x++))
+
+done  >/dev/null

@@ -1,0 +1,9 @@
+#!/bin/sh
+
+IPMI_HOTMOD_FILE="/sys/module/ipmi_si/parameters/hotmod"
+IPMI_PARAMS_FILE="/proc/ipmi/0/params"
+
+IPMI_PARAM=`cat $IPMI_PARAMS_FILE`
+echo "remove,"$IPMI_PARAM > $IPMI_HOTMOD_FILE
+echo "add,"$IPMI_PARAM > $IPMI_HOTMOD_FILE
+

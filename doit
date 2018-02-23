@@ -1,0 +1,15 @@
+#!/bin/ksh
+
+x=0
+
+while true; do
+
+if (( $x % 1000 == 0 )); then
+	echo "$1: loop count: $x" >/dev/tty
+fi
+
+/root/getInfoIPMI -c
+
+((x++))
+
+done  >/dev/null

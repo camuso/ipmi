@@ -1,0 +1,46 @@
+diff --git a/ipmiparm.cpp b/ipmiparm.cpp
+index c916d63..240eb20 100644
+--- a/ipmiparm.cpp
++++ b/ipmiparm.cpp
+@@ -43,13 +43,15 @@ using namespace std;
+ class kmodparm {
+ public:
+ 
+-    kmodparm() {value = 0; m_isbitmask = false; }
++    kmodparm() {value = 0; m_isbitmask = false; isstring = false; }
+ 
+     int togglebit(int bit, int& mask);
+ 
+     string kmodname;
+     string parmname;
+     int    value;
++    string strval;
++    bool   isstring;
+ 
+ private:
+     bool   m_isbitmask;
+@@ -165,7 +167,13 @@ void parmapp::init_kmod(string kmodstr)
+         cmd << "cat " << dir << str << "\n";
+         cmd.flush();
+         shell(cmd, s2);
+-        s2 >> km.parms[k].value;
++
++        if ((s2 >> km.parms[k].value).fail()) {
++            s2 >> km.parms[k].strval;
++            km.parms[k].isstring = true;
++        } else
++            km.parms[k].isstring = false;
++
+         ++k;
+     }
+ }
+@@ -305,6 +313,9 @@ void parmapp::editparm(kmodparm& parm)
+            parm.parmname.c_str(),
+            parm.value, parm.value);
+     cout << "----------------------------------\n";
++
++    if (parm.isstring)
++        parm.strval
+     parm.value = getint("  New value: ", parm.value);
+     cmd.str("");
+     ss.str("");

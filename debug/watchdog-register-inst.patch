@@ -1,0 +1,84 @@
+diff --git a/drivers/char/ipmi/ipmi_watchdog.c b/drivers/char/ipmi/ipmi_watchdog.c
+index 40d455f..b7a086b 100644
+--- a/drivers/char/ipmi/ipmi_watchdog.c
++++ b/drivers/char/ipmi/ipmi_watchdog.c
+@@ -974,6 +974,8 @@ static void ipmi_register_watchdog(int ipmi_intf)
+ {
+ 	int rv = -EBUSY;
+ 
++	printk(KERN_INFO PFX "%s\n", __func__);
++
+ 	if (watchdog_user)
+ 		goto out;
+ 
+@@ -982,6 +984,8 @@ static void ipmi_register_watchdog(int ipmi_intf)
+ 
+ 	watchdog_ifnum = ipmi_intf;
+ 
++	printk(KERN_INFO PFX "watchdog_ifnum: %d\n", watchdog_ifnum);
++
+ 	rv = ipmi_create_user(ipmi_intf, &ipmi_hndlrs, NULL, &watchdog_user);
+ 	if (rv < 0) {
+ 		printk(KERN_CRIT PFX "Unable to register with ipmi\n");
+@@ -992,6 +996,10 @@ static void ipmi_register_watchdog(int ipmi_intf)
+ 			 &ipmi_version_major,
+ 			 &ipmi_version_minor);
+ 
++	printk(KERN_INFO PFX "ipmi version: %d.%d\n",
++			ipmi_version_major,
++			ipmi_version_minor);
++
+ 	rv = misc_register(&ipmi_wdog_miscdev);
+ 	if (rv < 0) {
+ 		ipmi_destroy_user(watchdog_user);
+diff --git a/drivers/char/misc.c b/drivers/char/misc.c
+index f6e3160..dad498d 100644
+--- a/drivers/char/misc.c
++++ b/drivers/char/misc.c
+@@ -185,6 +185,13 @@ static const struct file_operations misc_fops = {
+  *	failure.
+  */
+  
++
++#define prdbg(...) \
++do { \
++	printk(KERN_INFO "%s: ", __func__); \
++	printk(__VA_ARGS__); \
++} while (0)
++
+ int misc_register(struct miscdevice * misc)
+ {
+ 	struct miscdevice *c;
+@@ -193,10 +200,17 @@ int misc_register(struct miscdevice * misc)
+ 
+ 	INIT_LIST_HEAD(&misc->list);
+ 
++	prdbg("processing misc->name: %s  minor: %d\n", \
++		misc->name, misc->minor);
++
+ 	mutex_lock(&misc_mtx);
+ 	list_for_each_entry(c, &misc_list, list) {
+ 		if (c->minor == misc->minor) {
+ 			mutex_unlock(&misc_mtx);
++			prdbg("%d already registered by " \
++				"nodename: %s init_name: %s\n", \
++				misc->minor, \
++				c->nodename, c->this_device->init_name);
+ 			return -EBUSY;
+ 		}
+ 	}
+@@ -216,11 +230,14 @@ int misc_register(struct miscdevice * misc)
+ 	if (misc->minor < DYNAMIC_MINORS)
+ 		misc_minors[misc->minor >> 3] |= 1 << (misc->minor & 7);
+ 	dev = MKDEV(MISC_MAJOR, misc->minor);
++	prdbg("dev maj.min = %08x\n", dev);
+ 
+ 	misc->this_device = device_create(misc_class, misc->parent, dev,
+ 					  misc, "%s", misc->name);
+ 	if (IS_ERR(misc->this_device)) {
+ 		err = PTR_ERR(misc->this_device);
++		prdbg("misc->this_device: %s is invalid: %08x\n", \
++			misc->this_device->init_name, err);
+ 		goto out;
+ 	}
+ 

@@ -1,0 +1,341 @@
+diff --git a/drivers/char/ipmi/ipmi_msghandler.c b/drivers/char/ipmi/ipmi_msghandler.c
+index b0ce751..30068ae 100644
+--- a/drivers/char/ipmi/ipmi_msghandler.c
++++ b/drivers/char/ipmi/ipmi_msghandler.c
+@@ -49,9 +49,10 @@
+ #include <linux/interrupt.h>
+ #endif
+ 
+-#define PFX "IPMI message handler: "
++#define PFX "ipmi_msghandler::"
+ 
+ #define IPMI_DRIVER_VERSION "39.2"
++#define DEBUG_MSGING
+ 
+ static struct ipmi_recv_msg *ipmi_alloc_recv_msg(void);
+ static int ipmi_init_msghandler(void);
+@@ -75,6 +76,16 @@ static struct proc_dir_entry *proc_ipmi_root;
+  */
+ #define MAX_MSG_TIMEOUT		60000
+ 
++#define prdbg(fmt, ...) \
++do { \
++	printk(KERN_INFO PFX "%s(): " fmt, __func__, ##__VA_ARGS__); \
++} while (0)
++
++#define prcaller() \
++do { \
++	printk("\tCaller: %pS\n", __builtin_return_address(0)); \
++} while (0)
++
+ /*
+  * The main "user" data structure.
+  */
+@@ -1485,6 +1496,7 @@ static int i_ipmi_request(ipmi_user_t          user,
+ 	unsigned long            flags;
+ 	struct ipmi_smi_handlers *handlers;
+ 
++	prdbg("\n");
+ 
+ 	if (supplied_recv)
+ 		recv_msg = supplied_recv;
+@@ -1495,11 +1507,15 @@ static int i_ipmi_request(ipmi_user_t          user,
+ 	}
+ 	recv_msg->user_msg_data = user_msg_data;
+ 
+-	if (supplied_smi)
++	if (supplied_smi) {
++		prdbg("supplied smi\n");
+ 		smi_msg = (struct ipmi_smi_msg *) supplied_smi;
++	}
+ 	else {
++		prdbg("Create new smi msg\n");
+ 		smi_msg = ipmi_alloc_smi_msg();
+ 		if (smi_msg == NULL) {
++			prdbg("Unable to create new smi msg\n");
+ 			ipmi_free_recv_msg(recv_msg);
+ 			return -ENOMEM;
+ 		}
+@@ -1508,6 +1524,7 @@ static int i_ipmi_request(ipmi_user_t          user,
+ 	rcu_read_lock();
+ 	handlers = intf->handlers;
+ 	if (!handlers) {
++		prdbg("No handlers\n");
+ 		rv = -ENODEV;
+ 		goto out_err;
+ 	}
+@@ -1525,8 +1542,12 @@ static int i_ipmi_request(ipmi_user_t          user,
+ 	if (addr->addr_type == IPMI_SYSTEM_INTERFACE_ADDR_TYPE) {
+ 		struct ipmi_system_interface_addr *smi_addr;
+ 
++		prdbg("addr->addr_type == IPMI_SYSTEM_INTERFACE_ADDR_TYPE: %d\n",
++			IPMI_SYSTEM_INTERFACE_ADDR_TYPE);
++
+ 		if (msg->netfn & 1) {
+ 			/* Responses are not allowed to the SMI. */
++			prdbg("Responses are not allowed to the SMI\n");
+ 			rv = -EINVAL;
+ 			goto out_err;
+ 		}
+@@ -1534,6 +1555,8 @@ static int i_ipmi_request(ipmi_user_t          user,
+ 		smi_addr = (struct ipmi_system_interface_addr *) addr;
+ 		if (smi_addr->lun > 3) {
+ 			ipmi_inc_stat(intf, sent_invalid_commands);
++			prdbg("smi_addr->lun: %d greater than 3\n",
++				smi_addr->lun);
+ 			rv = -EINVAL;
+ 			goto out_err;
+ 		}
+@@ -1549,6 +1572,7 @@ static int i_ipmi_request(ipmi_user_t          user,
+ 			 * the sequence numbers.
+ 			 */
+ 			ipmi_inc_stat(intf, sent_invalid_commands);
++			prdbg("Sent invalid command: %d\n", msg->cmd);
+ 			rv = -EINVAL;
+ 			goto out_err;
+ 		}
+@@ -1567,10 +1591,13 @@ static int i_ipmi_request(ipmi_user_t          user,
+ 			}
+ 			spin_unlock_irqrestore(&intf->maintenance_mode_lock,
+ 					       flags);
++			prdbg("Warm or Cold RESET or Firmware Request\n");
+ 		}
+ 
+ 		if ((msg->data_len + 2) > IPMI_MAX_MSG_LENGTH) {
+ 			ipmi_inc_stat(intf, sent_invalid_commands);
++			prdbg("(msg->data_len: %d + 2) > IPMI_MAX_MSG_LENGTH: %d\n",
++				msg->data_len, IPMI_MAX_MSG_LENGTH);
+ 			rv = -EMSGSIZE;
+ 			goto out_err;
+ 		}
+@@ -1583,14 +1610,19 @@ static int i_ipmi_request(ipmi_user_t          user,
+ 			memcpy(&(smi_msg->data[2]), msg->data, msg->data_len);
+ 		smi_msg->data_size = msg->data_len + 2;
+ 		ipmi_inc_stat(intf, sent_local_commands);
++		prdbg("ipmi_si command sent successfully\n");
+ 	} else if (is_ipmb_addr(addr) || is_ipmb_bcast_addr(addr)) {
+ 		struct ipmi_ipmb_addr *ipmb_addr;
+ 		unsigned char         ipmb_seq;
+ 		long                  seqid;
+ 		int                   broadcast = 0;
+ 
++		prdbg("is_ipmb_addr or is_ipmb_bcast_addr\n");
++
+ 		if (addr->channel >= IPMI_MAX_CHANNELS) {
+ 			ipmi_inc_stat(intf, sent_invalid_commands);
++			prdbg("addr->channel: %d >= IPMI_MAX_CHANNELS: %d\n",
++				addr->channel, IPMI_MAX_CHANNELS);
+ 			rv = -EINVAL;
+ 			goto out_err;
+ 		}
+@@ -1598,6 +1630,10 @@ static int i_ipmi_request(ipmi_user_t          user,
+ 		if (intf->channels[addr->channel].medium
+ 					!= IPMI_CHANNEL_MEDIUM_IPMB) {
+ 			ipmi_inc_stat(intf, sent_invalid_commands);
++			prdbg("intf->channels[addr->channel: %d].medium: %d)"\
++				" != IPMI_CHANNEL_MEDIUM_IPMB: %d\n", \
++				addr->channel, intf->channels[addr->channel].medium, \
++				IPMI_CHANNEL_MEDIUM_IPMB);
+ 			rv = -EINVAL;
+ 			goto out_err;
+ 		}
+@@ -1614,6 +1650,7 @@ static int i_ipmi_request(ipmi_user_t          user,
+ 		     * message, but otherwise is the same as an IPMB
+ 		     * address.
+ 		     */
++		    prdbg("IPMI_IPMB_BROADCAST_ADDR_TYPE\n");
+ 		    addr->addr_type = IPMI_IPMB_ADDR_TYPE;
+ 		    broadcast = 1;
+ 		}
+@@ -1629,6 +1666,9 @@ static int i_ipmi_request(ipmi_user_t          user,
+ 		 */
+ 		if ((msg->data_len + 10 + broadcast) > IPMI_MAX_MSG_LENGTH) {
+ 			ipmi_inc_stat(intf, sent_invalid_commands);
++			prdbg("msg->data_len: %d + 10 + broadcast: %d > "\
++				"IPMI_MAX_MSG_LENGTH: %d\n", msg->data_len,
++				broadcast, IPMI_MAX_MSG_LENGTH);
+ 			rv = -EMSGSIZE;
+ 			goto out_err;
+ 		}
+@@ -1636,6 +1676,7 @@ static int i_ipmi_request(ipmi_user_t          user,
+ 		ipmb_addr = (struct ipmi_ipmb_addr *) addr;
+ 		if (ipmb_addr->lun > 3) {
+ 			ipmi_inc_stat(intf, sent_invalid_commands);
++			prdbg("ipmb_addr->lun: %d > 3\n", ipmb_addr->lun);
+ 			rv = -EINVAL;
+ 			goto out_err;
+ 		}
+@@ -1647,6 +1688,8 @@ static int i_ipmi_request(ipmi_user_t          user,
+ 			 * It's a response, so use the user's sequence
+ 			 * from msgid.
+ 			 */
++			prdbg("recv_msg->msg.netfn: %d & 0x1 is a response from msgid: %ld\n",
++				recv_msg->msg.netfn, msgid);
+ 			ipmi_inc_stat(intf, sent_ipmb_responses);
+ 			format_ipmb_msg(smi_msg, msg, ipmb_addr, msgid,
+ 					msgid, broadcast,
+@@ -1660,6 +1703,7 @@ static int i_ipmi_request(ipmi_user_t          user,
+ 		} else {
+ 			/* It's a command, so get a sequence for it. */
+ 
++			prdbg("It's a command\n");
+ 			spin_lock_irqsave(&(intf->seq_lock), flags);
+ 
+ 			/*
+@@ -1680,6 +1724,7 @@ static int i_ipmi_request(ipmi_user_t          user,
+ 				 */
+ 				spin_unlock_irqrestore(&(intf->seq_lock),
+ 						       flags);
++				prdbg("Call to intf_next_seq() returned: %d\n", rv);
+ 				goto out_err;
+ 			}
+ 
+@@ -1713,13 +1758,18 @@ static int i_ipmi_request(ipmi_user_t          user,
+ 			 * to be correct.
+ 			 */
+ 			spin_unlock_irqrestore(&(intf->seq_lock), flags);
++			prdbg("ipmb or broadcast success\n");
+ 		}
+ 	} else if (is_lan_addr(addr)) {
+ 		struct ipmi_lan_addr  *lan_addr;
+ 		unsigned char         ipmb_seq;
+ 		long                  seqid;
+ 
++		prdbg("is_lan_addr\n");
++
+ 		if (addr->channel >= IPMI_MAX_CHANNELS) {
++			prdbg("addr->channel: %d >= IPMI_MAX_CHANNELS: %d\n",
++				addr->channel, IPMI_MAX_CHANNELS);
+ 			ipmi_inc_stat(intf, sent_invalid_commands);
+ 			rv = -EINVAL;
+ 			goto out_err;
+@@ -1730,6 +1780,10 @@ static int i_ipmi_request(ipmi_user_t          user,
+ 		    && (intf->channels[addr->channel].medium
+ 				!= IPMI_CHANNEL_MEDIUM_ASYNC)) {
+ 			ipmi_inc_stat(intf, sent_invalid_commands);
++			prdbg("intf->channels[addr->channel: %d].medium: %d)"\
++				" != IPMI_CHANNEL_MEDIUM_IPMB: %d\n", \
++				addr->channel, intf->channels[addr->channel].medium, \
++				IPMI_CHANNEL_MEDIUM_IPMB);
+ 			rv = -EINVAL;
+ 			goto out_err;
+ 		}
+@@ -1742,6 +1796,8 @@ static int i_ipmi_request(ipmi_user_t          user,
+ 
+ 		/* 11 for the header and 1 for the checksum. */
+ 		if ((msg->data_len + 12) > IPMI_MAX_MSG_LENGTH) {
++			prdbg("msg->data_len: %d + 12 > IPMI_MAX_MSG_LENGTH: %d\n",
++				msg->data_len, IPMI_MAX_MSG_LENGTH);
+ 			ipmi_inc_stat(intf, sent_invalid_commands);
+ 			rv = -EMSGSIZE;
+ 			goto out_err;
+@@ -1750,6 +1806,7 @@ static int i_ipmi_request(ipmi_user_t          user,
+ 		lan_addr = (struct ipmi_lan_addr *) addr;
+ 		if (lan_addr->lun > 3) {
+ 			ipmi_inc_stat(intf, sent_invalid_commands);
++			prdbg("lan_addr->lun: %d > 3\n", lan_addr->lun);
+ 			rv = -EINVAL;
+ 			goto out_err;
+ 		}
+@@ -1761,6 +1818,8 @@ static int i_ipmi_request(ipmi_user_t          user,
+ 			 * It's a response, so use the user's sequence
+ 			 * from msgid.
+ 			 */
++			prdbg("recv_msg->msg.netfn: %d & 0x1 is a response from msgid: %ld\n",
++				recv_msg->msg.netfn, msgid);
+ 			ipmi_inc_stat(intf, sent_lan_responses);
+ 			format_lan_msg(smi_msg, msg, lan_addr, msgid,
+ 				       msgid, source_lun);
+@@ -1773,6 +1832,7 @@ static int i_ipmi_request(ipmi_user_t          user,
+ 		} else {
+ 			/* It's a command, so get a sequence for it. */
+ 
++			prdbg("It's a command\n");
+ 			spin_lock_irqsave(&(intf->seq_lock), flags);
+ 
+ 			/*
+@@ -1793,6 +1853,7 @@ static int i_ipmi_request(ipmi_user_t          user,
+ 				 */
+ 				spin_unlock_irqrestore(&(intf->seq_lock),
+ 						       flags);
++				prdbg("Call to intf_next_seq() returned: %d\n", rv);
+ 				goto out_err;
+ 			}
+ 
+@@ -1825,10 +1886,12 @@ static int i_ipmi_request(ipmi_user_t          user,
+ 			 * to be correct.
+ 			 */
+ 			spin_unlock_irqrestore(&(intf->seq_lock), flags);
++			prdbg("lan command success!\n");
+ 		}
+ 	} else {
+ 	    /* Unknown address type. */
+ 		ipmi_inc_stat(intf, sent_invalid_commands);
++		prdbg("Unknown address type\n");
+ 		rv = -EINVAL;
+ 		goto out_err;
+ 	}
+@@ -1910,11 +1973,18 @@ int ipmi_request_supply_msgs(ipmi_user_t          user,
+ 	unsigned char saddr, lun;
+ 	int           rv;
+ 
+-	if (!user)
++	prdbg("\n");
++	prcaller();
++
++	if (!user) {
++		prdbg("!user\n");
+ 		return -EINVAL;
++	}
+ 	rv = check_addr(user->intf, addr, &saddr, &lun);
+-	if (rv)
++	if (rv) {
++		prdbg("Call to check_addr() returned: %d\n", rv);
+ 		return rv;
++	}
+ 	return i_ipmi_request(user,
+ 			      user->intf,
+ 			      addr,
+diff --git a/drivers/char/ipmi/ipmi_watchdog.c b/drivers/char/ipmi/ipmi_watchdog.c
+index 3bb9a09..95c3e21 100644
+--- a/drivers/char/ipmi/ipmi_watchdog.c
++++ b/drivers/char/ipmi/ipmi_watchdog.c
+@@ -68,7 +68,17 @@
+ #define HAVE_DIE_NMI
+ #endif
+ 
+-#define	PFX "IPMI Watchdog: "
++#define	PFX "ipmi_watchdog::"
++
++#define prdbg(fmt, ...) \
++do { \
++	printk(KERN_INFO PFX "%s(): " fmt, __func__, ##__VA_ARGS__); \
++} while (0)
++
++#define prcaller() \
++do { \
++	printk("\tCaller: %pS\n", __builtin_return_address(0)); \
++} while (0)
+ 
+ /*
+  * The IPMI command/response information for the watchdog timer.
+@@ -375,6 +385,8 @@ static int i_ipmi_set_timeout(struct ipmi_smi_msg  *smi_msg,
+ 	struct ipmi_system_interface_addr addr;
+ 	int                               hbnow = 0;
+ 
++	prdbg("\n");
++	prcaller();
+ 
+ 	/* These can be cleared as we are setting the timeout. */
+ 	pretimeout_since_last_heartbeat = 0;
+@@ -437,7 +449,9 @@ static int ipmi_set_timeout(int do_heartbeat)
+ {
+ 	int send_heartbeat_now;
+ 	int rv;
+-
++	
++	prdbg("\n");
++	prcaller();
+ 
+ 	/* We can only send one of these at a time. */
+ 	mutex_lock(&set_timeout_lock);

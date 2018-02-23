@@ -1,0 +1,233 @@
+diff --git a/drivers/acpi/acpi_ipmi.c b/drivers/acpi/acpi_ipmi.c
+index 375d06d..1074138 100644
+--- a/drivers/acpi/acpi_ipmi.c
++++ b/drivers/acpi/acpi_ipmi.c
+@@ -53,6 +53,25 @@ MODULE_LICENSE("GPL");
+ /* the IPMI timeout is 5s */
+ #define IPMI_TIMEOUT			(5 * HZ)
+ 
++#define PFX "acpi_ipmi: "
++
++#define prdbg(fmt, ...) \
++do { \
++       printk(KERN_INFO PFX "%s(): " fmt, __func__, ##__VA_ARGS__); \
++} while (0)
++
++#define prcaller() \
++do { \
++       printk(KERN_INFO "Caller: %pS\n", __builtin_return_address(0)); \
++} while (0)
++
++#define prentry() \
++do { \
++	printk(KERN_INFO "\n"); \
++	printk(KERN_INFO PFX "%s(): Caller %pS\n ", \
++			__func__, __builtin_return_address(0)); \
++} while (0)
++
+ struct acpi_ipmi_device {
+ 	/* the device list attached to driver_data.ipmi_devices */
+ 	struct list_head head;
+@@ -327,6 +346,8 @@ static void ipmi_register_bmc(int iface, struct device *dev)
+ 	struct ipmi_smi_info smi_data;
+ 	acpi_handle handle;
+ 
++	prentry();
++
+ 	err = ipmi_get_smi_info(iface, &smi_data);
+ 
+ 	if (err)
+diff --git a/drivers/char/ipmi/ipmi_msghandler.c b/drivers/char/ipmi/ipmi_msghandler.c
+index 7f92c20..b4af417 100644
+--- a/drivers/char/ipmi/ipmi_msghandler.c
++++ b/drivers/char/ipmi/ipmi_msghandler.c
+@@ -49,10 +49,28 @@
+ #include <linux/interrupt.h>
+ #endif
+ 
+-#define PFX "IPMI message handler: "
++//#define PFX "IPMI message handler: "
++#define PFX "ipmi_msghandler: "
+ 
+ #define IPMI_DRIVER_VERSION "39.2"
+ 
++#define prdbg(fmt, ...) \
++do { \
++       printk(KERN_INFO PFX "%s(): " fmt, __func__, ##__VA_ARGS__); \
++} while (0)
++
++#define prcaller() \
++do { \
++       printk(KERN_INFO "Caller: %pS\n", __builtin_return_address(0)); \
++} while (0)
++
++#define prentry() \
++do { \
++	printk(KERN_INFO "\n"); \
++	printk(KERN_INFO PFX "%s(): Caller %pS\n", \
++			__func__, __builtin_return_address(0)); \
++} while (0)
++
+ static struct ipmi_recv_msg *ipmi_alloc_recv_msg(void);
+ static int ipmi_init_msghandler(void);
+ static void smi_recv_tasklet(unsigned long);
+@@ -1044,10 +1062,19 @@ int ipmi_get_smi_info(int if_num, struct ipmi_smi_info *data)
+ 	ipmi_smi_t    intf;
+ 	struct ipmi_smi_handlers *handlers;
+ 
++	prentry();
++
++	prdbg("ipmi_smi_info *data: %p\n", data);
++	print_hex_dump(KERN_INFO, "data: ", DUMP_PREFIX_OFFSET,
++			16, 1, data, sizeof(struct ipmi_smi_info), 1);
++
+ 	mutex_lock(&ipmi_interfaces_mutex);
+ 	list_for_each_entry_rcu(intf, &ipmi_interfaces, link) {
+-		if (intf->intf_num == if_num)
++		if (intf->intf_num == if_num) {
++			memcpy(data, intf->send_info,
++				sizeof(struct ipmi_smi_info));
+ 			goto found;
++		}
+ 	}
+ 	/* Not found, return an error */
+ 	rv = -EINVAL;
+@@ -1055,12 +1082,32 @@ int ipmi_get_smi_info(int if_num, struct ipmi_smi_info *data)
+ 	return rv;
+ 
+ found:
++	prdbg("intf->intf_num = %d\n", intf->intf_num);
++	prdbg("ipmi_smi_info *intf->send_info: %p\n", intf->send_info);
++	print_hex_dump(KERN_INFO, "info: ", DUMP_PREFIX_OFFSET,
++			16, 1, intf->send_info, sizeof(struct ipmi_smi_info), 1);
++
+ 	handlers = intf->handlers;
+ 	if(shadow_smi_handlers.get_smi_info) {
+-		BUG_ON(shadow_smi_handlers.handlers != handlers);
+-		rv = shadow_smi_handlers.get_smi_info(intf->send_info, data);
++		// BUG_ON(shadow_smi_handlers.handlers != handlers);
++		if (shadow_smi_handlers.handlers != handlers) {
++			mutex_unlock(&ipmi_interfaces_mutex);
++			prdbg("shadow_smi_handlers.handlers != handlers\n");
++			prdbg("%p != %p\n", shadow_smi_handlers.handlers, handlers);
++			prdbg("return -EINVAL\n");
++			return -EINVAL;
++		} else {
++			mutex_unlock(&ipmi_interfaces_mutex);
++			prdbg("shadow_smi_handlers.handlers = handlers\n");
++			prdbg("%p == %p\n", shadow_smi_handlers.handlers, handlers);
++			prdbg("call shadow_smi_handlers.get_smi_info (%p)\n",
++				shadow_smi_handlers.get_smi_info);
++			mutex_lock(&ipmi_interfaces_mutex);
++			rv = shadow_smi_handlers.get_smi_info(intf->send_info,
++								data);
++			mutex_unlock(&ipmi_interfaces_mutex);
++		}
+ 	}
+-	mutex_unlock(&ipmi_interfaces_mutex);
+ 
+ 	return rv;
+ }
+@@ -2892,6 +2939,8 @@ int ipmi_register_smi(struct ipmi_smi_handlers *handlers,
+ 	ipmi_smi_t       tintf;
+ 	struct list_head *link;
+ 
++	prentry();
++
+ 	/*
+ 	 * Make sure the driver is actually initialized, this handles
+ 	 * problems with initialization order.
+@@ -2904,13 +2953,17 @@ int ipmi_register_smi(struct ipmi_smi_handlers *handlers,
+ 		 * The init code doesn't return an error if it was turned
+ 		 * off, but it won't initialize.  Check that.
+ 		 */
+-		if (!initialized)
++		if (!initialized) {
++			prdbg("Not Initialized!\n");
+ 			return -ENODEV;
++		}
+ 	}
+ 
+ 	intf = kzalloc(sizeof(*intf), GFP_KERNEL);
+-	if (!intf)
++	if (!intf) {
++		prdbg("Cannot alloc intf\n");
+ 		return -ENOMEM;
++	}
+ 
+ 	intf->ipmi_version_major = ipmi_version_major(device_id);
+ 	intf->ipmi_version_minor = ipmi_version_minor(device_id);
+@@ -2918,6 +2971,7 @@ int ipmi_register_smi(struct ipmi_smi_handlers *handlers,
+ 	intf->bmc = kzalloc(sizeof(*intf->bmc), GFP_KERNEL);
+ 	if (!intf->bmc) {
+ 		kfree(intf);
++		prdbg("No BMC\n");
+ 		return -ENOMEM;
+ 	}
+ 	intf->intf_num = -1; /* Mark it invalid for now. */
+@@ -2938,6 +2992,9 @@ int ipmi_register_smi(struct ipmi_smi_handlers *handlers,
+ 	shadow_smi_handlers.get_smi_info = NULL;
+ 	shadow_smi_handlers.set_need_watch = NULL;
+ 
++	prdbg("shadow_smi_handlers.handlers = handlers\n");
++	prdbg("%p = %p\n", shadow_smi_handlers.handlers, handlers);
++
+ 	intf->handlers = handlers;
+ 	intf->send_info = send_info;
+ 	spin_lock_init(&intf->seq_lock);
+diff --git a/drivers/char/ipmi/ipmi_si_intf.c b/drivers/char/ipmi/ipmi_si_intf.c
+index 6d53661..fba6cca 100644
+--- a/drivers/char/ipmi/ipmi_si_intf.c
++++ b/drivers/char/ipmi/ipmi_si_intf.c
+@@ -74,6 +74,23 @@
+ 
+ #define PFX "ipmi_si: "
+ 
++#define prdbg(fmt, ...) \
++do { \
++       printk(KERN_INFO PFX "%s(): " fmt, __func__, ##__VA_ARGS__); \
++} while (0)
++
++#define prcaller() \
++do { \
++       printk(KERN_INFO "Caller: %pS\n", __builtin_return_address(0)); \
++} while (0)
++
++#define prentry() \
++do { \
++	printk(KERN_INFO "\n"); \
++	printk(KERN_INFO PFX "%s(): Caller %pS\n", \
++			__func__, __builtin_return_address(0)); \
++} while (0)
++
+ /* Measure times between events in the driver. */
+ #undef DEBUG_TIMING
+ 
+@@ -1228,6 +1245,9 @@ int ipmi_si_get_smi_info(void *send_info, struct ipmi_smi_info *data)
+ {
+ 	struct smi_info *smi = send_info;
+ 
++	prentry();
++	prdbg("ipmi_smi_info ptr: %p\n", data);
++
+ 	if (!smi || (smi->token != SI_INTF_TOKEN))
+ 		return -ENOSYS;
+ 
+@@ -3189,6 +3209,8 @@ static int try_smi_init(struct smi_info *new_smi)
+ 	int i;
+ 	struct ipmi_shadow_smi_handlers *shadow_handlers;
+ 
++	prentry();
++
+ 	printk(KERN_INFO PFX "Trying %s-specified %s state"
+ 	       " machine at %s address 0x%lx, slave address 0x%x,"
+ 	       " irq %d\n",
+@@ -3331,6 +3353,8 @@ static int try_smi_init(struct smi_info *new_smi)
+ 	shadow_handlers->get_smi_info = ipmi_si_get_smi_info;
+ 	shadow_handlers->set_need_watch = set_need_watch;
+ 
++	prdbg("shadow_smi_handlers->handlers = %p\n", shadow_handlers->handlers);
++
+ 	rv = ipmi_smi_add_proc_entry(new_smi->intf, "type",
+ 				     type_file_read_proc,
+ 				     new_smi);
