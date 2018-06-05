@@ -1,0 +1,18 @@
+diff --git a/drivers/char/ipmi/ipmi_dmi.c b/drivers/char/ipmi/ipmi_dmi.c
+index c5112b1..b2bb1c8 100644
+--- a/drivers/char/ipmi/ipmi_dmi.c
++++ b/drivers/char/ipmi/ipmi_dmi.c
+@@ -296,6 +296,13 @@ static void __init dmi_decode_ipmi(const struct dmi_header *dm)
+ static int __init scan_for_dmi_ipmi(void)
+ {
+ 	const struct dmi_device *dev = NULL;
++	char *dmistr;
++
++	dmistr = dmi_get_system_info(DMI_SYS_VENDOR);
++	printk("** DMI_SYS_VENDOR: %s\n", dmistr);
++
++	dmistr = dmi_get_system_info(DMI_PRODUCT_NAME);
++	printk("** DMI_PRODUCT_NAME: %s\n", dmistr);
+ 
+ 	while ((dev = dmi_find_device(DMI_DEV_TYPE_IPMI, NULL, dev)))
+ 		dmi_decode_ipmi((const struct dmi_header *) dev->device_data);
